@@ -10,14 +10,16 @@ import io
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Optimizador de Rutas", page_icon="🚚", layout="wide")
 st.title("🚚 Optimizador de Rutas Logísticas")
-st.markdown("Sube tu archivo de clientes del día, presiona el botón y obtén las rutas óptimas para los conductores.")
 
-# --- INTERFAZ: SUBIR ARCHIVO ---
+# --- INICIALIZAR LA MEMORIA DE STREAMLIT ---
+# Esto evita que los resultados desaparezcan
+if 'rutas_calculadas' not in st.session_state:
+    st.session_state.rutas_calculadas = False
+
 archivo_subido = st.file_uploader("Sube tu plantilla de Excel (Acopios, Vehiculos, Recolecciones)", type=["xlsx"])
 
 if archivo_subido is not None:
     try:
-        # Leer el Excel
         df_acopios = pd.read_excel(archivo_subido, sheet_name='Acopios')
         df_vehiculos = pd.read_excel(archivo_subido, sheet_name='Vehiculos')
         df_recolecciones = pd.read_excel(archivo_subido, sheet_name='Recolecciones')
@@ -28,7 +30,6 @@ if archivo_subido is not None:
         if st.button("Optimizar Rutas Ahora 🚀", type="primary"):
             with st.spinner("Calculando las mejores rutas..."):
                 
-                # 1. PREPARACIÓN
                 todos_los_nodos = pd.concat([
                     df_acopios[['ID_Acopio', 'Latitud', 'Longitud']].rename(columns={'ID_Acopio': 'ID'}),
                     df_recolecciones[['ID_Punto', 'Latitud', 'Longitud']].rename(columns={'ID_Punto': 'ID'})
@@ -56,7 +57,6 @@ if archivo_subido is not None:
                 num_vehiculos = len(capacidades_vehiculos)
                 demandas = [0] * len(df_acopios) + df_recolecciones['Demanda_Carga'].fillna(0).tolist()
 
-                # 2. MOTOR OR-TOOLS
                 manager = pywrapcp.RoutingIndexManager(len(matriz_distancias), num_vehiculos, starts, ends)
                 routing = pywrapcp.RoutingModel(manager)
 
@@ -77,9 +77,7 @@ if archivo_subido is not None:
 
                 solucion = routing.SolveWithParameters(search_parameters)
 
-                # 3. RESULTADOS Y VISUALIZACIÓN
                 if solucion:
-                    st.subheader("📋 Resultados de la Optimización")
                     datos_tabla = []
                     rutas_para_mapa = []
                     distancia_total = 0
@@ -110,7 +108,6 @@ if archivo_subido is not None:
                             route_dist += routing.GetArcCostForVehicle(prev_index, index, vehicle_id)
                             paso += 1
                             
-                        # Punto final
                         node_index = manager.IndexToNode(index)
                         datos_tabla.append({
                             'Camión': id_vehiculo, 'Parada #': paso, 'Ubicación': todos_los_nodos.iloc[node_index]['ID'],
@@ -119,50 +116,59 @@ if archivo_subido is not None:
                         coords.append((todos_los_nodos.iloc[node_index]['Latitud'], todos_los_nodos.iloc[node_index]['Longitud']))
                         
                         distancia_total += route_dist
-                        if len(coords) > 2: # Solo camiones con actividad
+                        if len(coords) > 2: 
                             rutas_para_mapa.append({'vehiculo': id_vehiculo, 'coordenadas': coords, 'nodos': nodos})
 
-                    # Mostrar Tabla
                     df_final = pd.DataFrame(datos_tabla)
                     vehiculos_activos = df_final.groupby('Camión')['Km Recorridos'].max()
                     df_activas = df_final[df_final['Camión'].isin(vehiculos_activos[vehiculos_activos > 0].index)]
                     
-                    st.dataframe(df_activas, use_container_width=True)
-                    st.info(f"🌎 Distancia total operativa de la flota: {round(distancia_total / 1000, 2)} km")
-
-                    # Botón para descargar Excel
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                        df_activas.to_excel(writer, index=False, sheet_name='Rutas_Optimizadas')
-                    output.seek(0)
-                    
-                    st.download_button(
-                        label="📥 Descargar Hoja de Ruta (Excel)",
-                        data=output,
-                        file_name="hoja_de_ruta_conductores.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="secondary"
-                    )
-
-                    # Mostrar Mapa
-                    st.subheader("🗺️ Mapa de Rutas")
-                    mapa = folium.Map(location=[todos_los_nodos['Latitud'].mean(), todos_los_nodos['Longitud'].mean()], zoom_start=13)
-                    colores_hex = ['#d32f2f', '#1976d2', '#388e3c', '#7b1fa2', '#f57c00', '#0097a7']
-                    
-                    for _, row in df_acopios.iterrows():
-                        folium.Marker([row['Latitud'], row['Longitud']], popup=f"Acopio: {row['ID_Acopio']}", icon=folium.Icon(color='black', icon='home')).add_to(mapa)
-
-                    for i, ruta in enumerate(rutas_para_mapa):
-                        color = colores_hex[i % len(colores_hex)]
-                        folium.PolyLine(ruta['coordenadas'], weight=4, color=color, tooltip=f"Camión: {ruta['vehiculo']}").add_to(mapa)
-                        for nodo in ruta['nodos'][1:]: # Omitir el paso 0
-                            html = f'''<div style="color: white; background-color: {color}; border-radius: 50%; width: 24px; height: 24px; display: flex; justify-content: center; align-items: center; border: 2px solid white; font-weight: bold; font-size: 13px;">{nodo['paso']}</div>'''
-                            folium.Marker([nodo['lat'], nodo['lon']], tooltip=f"Parada #{nodo['paso']}", icon=folium.DivIcon(html=html)).add_to(mapa)
-
-                    st_folium(mapa, width=1000, height=600)
+                    # --- GUARDAR RESULTADOS EN LA MEMORIA ---
+                    st.session_state.df_activas = df_activas
+                    st.session_state.distancia_total = distancia_total
+                    st.session_state.rutas_para_mapa = rutas_para_mapa
+                    st.session_state.todos_los_nodos = todos_los_nodos
+                    st.session_state.df_acopios = df_acopios
+                    st.session_state.rutas_calculadas = True
 
                 else:
-                    st.error("🛑 No se encontró una solución. Verifica las capacidades de los vehículos y las demandas.")
+                    st.error("🛑 No se encontró una solución con la capacidad actual de los vehículos.")
+                    st.session_state.rutas_calculadas = False
+
+        # --- MOSTRAR LOS RESULTADOS GUARDADOS EN MEMORIA ---
+        if st.session_state.rutas_calculadas:
+            st.subheader("📋 Resultados de la Optimización")
+            st.dataframe(st.session_state.df_activas, use_container_width=True)
+            st.info(f"🌎 Distancia total operativa de la flota: {round(st.session_state.distancia_total / 1000, 2)} km")
+
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                st.session_state.df_activas.to_excel(writer, index=False, sheet_name='Rutas_Optimizadas')
+            output.seek(0)
+            
+            st.download_button(
+                label="📥 Descargar Hoja de Ruta (Excel)",
+                data=output,
+                file_name="hoja_de_ruta_conductores.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="secondary"
+            )
+
+            st.subheader("🗺️ Mapa de Rutas")
+            mapa = folium.Map(location=[st.session_state.todos_los_nodos['Latitud'].mean(), st.session_state.todos_los_nodos['Longitud'].mean()], zoom_start=13)
+            colores_hex = ['#d32f2f', '#1976d2', '#388e3c', '#7b1fa2', '#f57c00', '#0097a7']
+            
+            for _, row in st.session_state.df_acopios.iterrows():
+                folium.Marker([row['Latitud'], row['Longitud']], popup=f"Acopio: {row['ID_Acopio']}", icon=folium.Icon(color='black', icon='home')).add_to(mapa)
+
+            for i, ruta in enumerate(st.session_state.rutas_para_mapa):
+                color = colores_hex[i % len(colores_hex)]
+                folium.PolyLine(ruta['coordenadas'], weight=4, color=color, tooltip=f"Camión: {ruta['vehiculo']}").add_to(mapa)
+                for nodo in ruta['nodos'][1:]:
+                    html = f'''<div style="color: white; background-color: {color}; border-radius: 50%; width: 24px; height: 24px; display: flex; justify-content: center; align-items: center; border: 2px solid white; font-weight: bold; font-size: 13px;">{nodo['paso']}</div>'''
+                    folium.Marker([nodo['lat'], nodo['lon']], tooltip=f"Parada #{nodo['paso']}", icon=folium.DivIcon(html=html)).add_to(mapa)
+
+            st_folium(mapa, width=1000, height=600)
 
     except Exception as e:
-        st.error(f"Error al procesar el archivo. Asegúrate de que tenga las pestañas 'Acopios', 'Vehiculos' y 'Recolecciones'. Detalle técnico: {e}")
+        st.error(f"Error al procesar el archivo. Detalle técnico: {e}")
