@@ -6,13 +6,13 @@ from ortools.constraint_solver import pywrapcp
 import folium
 from streamlit_folium import st_folium
 import io
+import requests # <--- NUEVA HERRAMIENTA PARA OSRM
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Optimizador de Rutas", page_icon="🚚", layout="wide")
-st.title("🚚 Optimizador de Rutas Logísticas")
+st.title("🚚 Optimizador de Rutas Logísticas (Pro)")
 
 # --- INICIALIZAR LA MEMORIA DE STREAMLIT ---
-# Esto evita que los resultados desaparezcan
 if 'rutas_calculadas' not in st.session_state:
     st.session_state.rutas_calculadas = False
 
@@ -24,27 +24,42 @@ if archivo_subido is not None:
         df_vehiculos = pd.read_excel(archivo_subido, sheet_name='Vehiculos')
         df_recolecciones = pd.read_excel(archivo_subido, sheet_name='Recolecciones')
         
-        st.success(f"✅ Archivo cargado correctamente: {len(df_recolecciones)} clientes para visitar hoy.")
+        st.success(f"✅ Archivo cargado correctamente: {len(df_recolecciones)} clientes para visitar.")
         
-        # --- BOTÓN PARA INICIAR LA MAGIA ---
         if st.button("Optimizar Rutas Ahora 🚀", type="primary"):
-            with st.spinner("Calculando las mejores rutas..."):
+            with st.spinner("Calculando distancias de calles y buscando rutas..."):
                 
                 todos_los_nodos = pd.concat([
                     df_acopios[['ID_Acopio', 'Latitud', 'Longitud']].rename(columns={'ID_Acopio': 'ID'}),
                     df_recolecciones[['ID_Punto', 'Latitud', 'Longitud']].rename(columns={'ID_Punto': 'ID'})
                 ]).reset_index(drop=True)
 
+                # --- NUEVA FUNCIÓN CON OSRM ---
                 def crear_matriz_distancias(nodos):
+                    n = len(nodos)
+                    coords = [f"{row['Longitud']},{row['Latitud']}" for _, row in nodos.iterrows()]
+                    
+                    # OSRM gratuito solo permite 100 puntos. Si son menos, usamos calles reales.
+                    if n <= 100:
+                        coords_str = ";".join(coords)
+                        url = f"http://router.project-osrm.org/table/v1/driving/{coords_str}?annotations=distance"
+                        try:
+                            res = requests.get(url).json()
+                            if res.get('code') == 'Ok':
+                                return [[int(d) for d in fila] for fila in res['distances']]
+                        except:
+                            pass # Si falla el internet, pasa al plan B automático
+                            
+                    # Plan B: Si son más de 100 puntos o falla OSRM, usa "Factor Urbano" (Línea Recta x 1.4)
                     matriz = []
-                    for i in range(len(nodos)):
+                    for i in range(n):
                         fila = []
-                        for j in range(len(nodos)):
+                        for j in range(n):
                             if i == j: fila.append(0)
                             else:
-                                coord1 = (nodos.loc[i, 'Latitud'], nodos.loc[i, 'Longitud'])
-                                coord2 = (nodos.loc[j, 'Latitud'], nodos.loc[j, 'Longitud'])
-                                fila.append(int(geodesic(coord1, coord2).kilometers * 1000)) 
+                                c1 = (nodos.loc[i, 'Latitud'], nodos.loc[i, 'Longitud'])
+                                c2 = (nodos.loc[j, 'Latitud'], nodos.loc[j, 'Longitud'])
+                                fila.append(int(geodesic(c1, c2).meters * 1.4))
                         matriz.append(fila)
                     return matriz
 
@@ -73,7 +88,7 @@ if archivo_subido is not None:
                 search_parameters = pywrapcp.DefaultRoutingSearchParameters()
                 search_parameters.first_solution_strategy = (routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
                 search_parameters.local_search_metaheuristic = (routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH)
-                search_parameters.time_limit.FromSeconds(5)
+                search_parameters.time_limit.FromSeconds(15) # Le dimos 15 segundos para pensar mejor
 
                 solucion = routing.SolveWithParameters(search_parameters)
 
@@ -81,12 +96,14 @@ if archivo_subido is not None:
                     datos_tabla = []
                     rutas_para_mapa = []
                     distancia_total = 0
+                    colores_hex = ['#d32f2f', '#1976d2', '#388e3c', '#7b1fa2', '#f57c00', '#0097a7', '#5d4037', '#c2185b']
 
                     for vehicle_id in range(num_vehiculos):
                         index = routing.Start(vehicle_id)
                         id_vehiculo = df_vehiculos.iloc[vehicle_id]["ID_Vehiculo"]
                         route_dist, route_load, paso = 0, 0, 0
                         coords, nodos = [], []
+                        color_asignado = colores_hex[vehicle_id % len(colores_hex)]
                         
                         while not routing.IsEnd(index):
                             node_index = manager.IndexToNode(index)
@@ -117,13 +134,13 @@ if archivo_subido is not None:
                         
                         distancia_total += route_dist
                         if len(coords) > 2: 
-                            rutas_para_mapa.append({'vehiculo': id_vehiculo, 'coordenadas': coords, 'nodos': nodos})
+                            # Guardamos el color aquí para usarlo en la leyenda después
+                            rutas_para_mapa.append({'vehiculo': id_vehiculo, 'coordenadas': coords, 'nodos': nodos, 'color': color_asignado})
 
                     df_final = pd.DataFrame(datos_tabla)
                     vehiculos_activos = df_final.groupby('Camión')['Km Recorridos'].max()
                     df_activas = df_final[df_final['Camión'].isin(vehiculos_activos[vehiculos_activos > 0].index)]
                     
-                    # --- GUARDAR RESULTADOS EN LA MEMORIA ---
                     st.session_state.df_activas = df_activas
                     st.session_state.distancia_total = distancia_total
                     st.session_state.rutas_para_mapa = rutas_para_mapa
@@ -132,7 +149,7 @@ if archivo_subido is not None:
                     st.session_state.rutas_calculadas = True
 
                 else:
-                    st.error("🛑 No se encontró una solución con la capacidad actual de los vehículos.")
+                    st.error("🛑 No se encontró una solución. Verifica las capacidades.")
                     st.session_state.rutas_calculadas = False
 
         # --- MOSTRAR LOS RESULTADOS GUARDADOS EN MEMORIA ---
@@ -154,21 +171,48 @@ if archivo_subido is not None:
                 type="secondary"
             )
 
-            st.subheader("🗺️ Mapa de Rutas")
+            st.subheader("🗺️ Mapa Visual de Rutas")
             mapa = folium.Map(location=[st.session_state.todos_los_nodos['Latitud'].mean(), st.session_state.todos_los_nodos['Longitud'].mean()], zoom_start=13)
-            colores_hex = ['#d32f2f', '#1976d2', '#388e3c', '#7b1fa2', '#f57c00', '#0097a7']
             
+            # --- 1. AÑADIR LEYENDA (CONVENCIONES DE COLORES) ---
+            legend_html = '''
+                <div style="position: fixed; bottom: 50px; left: 50px; width: auto; min-width: 150px; height: auto; 
+                            border:2px solid grey; z-index:9999; font-size:14px;
+                            background-color:white; padding: 10px; border-radius: 5px; box-shadow: 2px 2px 5px rgba(0,0,0,0.3);">
+                <b>🚛 Vehículos (Rutas)</b><br><hr style="margin: 5px 0;">
+            '''
+            for ruta in st.session_state.rutas_para_mapa:
+                legend_html += f'<div style="margin-bottom: 3px;"><i style="background:{ruta["color"]}; width: 14px; height: 14px; display: inline-block; border-radius: 50%; margin-right: 5px; vertical-align: middle;"></i> <b>{ruta["vehiculo"]}</b></div>'
+            legend_html += '</div>'
+            mapa.get_root().html.add_child(folium.Element(legend_html))
+
             for _, row in st.session_state.df_acopios.iterrows():
                 folium.Marker([row['Latitud'], row['Longitud']], popup=f"Acopio: {row['ID_Acopio']}", icon=folium.Icon(color='black', icon='home')).add_to(mapa)
 
-            for i, ruta in enumerate(st.session_state.rutas_para_mapa):
-                color = colores_hex[i % len(colores_hex)]
-                folium.PolyLine(ruta['coordenadas'], weight=4, color=color, tooltip=f"Camión: {ruta['vehiculo']}").add_to(mapa)
+            # --- 2. DIBUJAR RUTAS Y ETIQUETAS EXPLÍCITAS ---
+            for ruta in st.session_state.rutas_para_mapa:
+                color = ruta['color']
+                folium.PolyLine(ruta['coordenadas'], weight=4, color=color, opacity=0.8).add_to(mapa)
+                
                 for nodo in ruta['nodos'][1:]:
-                    html = f'''<div style="color: white; background-color: {color}; border-radius: 50%; width: 24px; height: 24px; display: flex; justify-content: center; align-items: center; border: 2px solid white; font-weight: bold; font-size: 13px;">{nodo['paso']}</div>'''
-                    folium.Marker([nodo['lat'], nodo['lon']], tooltip=f"Parada #{nodo['paso']}", icon=folium.DivIcon(html=html)).add_to(mapa)
+                    # Etiqueta HTML con el número arriba y el ID del cliente abajo
+                    html = f'''
+                        <div style="display: flex; flex-direction: column; align-items: center; margin-top: -10px;">
+                            <div style="color: white; background-color: {color}; border-radius: 50%; width: 24px; height: 24px; display: flex; justify-content: center; align-items: center; border: 2px solid white; font-weight: bold; font-size: 13px; box-shadow: 1px 1px 3px rgba(0,0,0,0.5);">
+                                {nodo['paso']}
+                            </div>
+                            <div style="background-color: rgba(255,255,255,0.9); color: black; font-size: 11px; padding: 2px 5px; border-radius: 4px; border: 1px solid {color}; margin-top: 2px; white-space: nowrap; font-weight: bold; box-shadow: 1px 1px 2px rgba(0,0,0,0.3);">
+                                {nodo['id']}
+                            </div>
+                        </div>
+                    '''
+                    folium.Marker(
+                        [nodo['lat'], nodo['lon']], 
+                        tooltip=f"Parada #{nodo['paso']} | Cliente: {nodo['id']} | Vehículo: {ruta['vehiculo']}", 
+                        icon=folium.DivIcon(html=html)
+                    ).add_to(mapa)
 
             st_folium(mapa, width=1000, height=600)
 
     except Exception as e:
-        st.error(f"Error al procesar el archivo. Detalle técnico: {e}")
+        st.error(f"Error al procesar. Detalle técnico: {e}")
