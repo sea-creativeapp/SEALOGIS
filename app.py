@@ -6,7 +6,7 @@ from ortools.constraint_solver import pywrapcp
 import folium
 from streamlit_folium import st_folium
 import io
-import requests # <--- NUEVA HERRAMIENTA PARA OSRM
+import requests
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Optimizador de Rutas", page_icon="🚚", layout="wide")
@@ -25,6 +25,7 @@ if archivo_subido is not None:
         df_recolecciones = pd.read_excel(archivo_subido, sheet_name='Recolecciones')
         
         st.success(f"✅ Archivo cargado correctamente: {len(df_recolecciones)} clientes para visitar.")
+        st.info(f"🚚 Flota disponible detectada: {len(df_vehiculos)} vehículos en el archivo.")
         
         if st.button("Optimizar Rutas Ahora 🚀", type="primary"):
             with st.spinner("Calculando distancias de calles y buscando rutas..."):
@@ -34,12 +35,10 @@ if archivo_subido is not None:
                     df_recolecciones[['ID_Punto', 'Latitud', 'Longitud']].rename(columns={'ID_Punto': 'ID'})
                 ]).reset_index(drop=True)
 
-                # --- NUEVA FUNCIÓN CON OSRM ---
                 def crear_matriz_distancias(nodos):
                     n = len(nodos)
                     coords = [f"{row['Longitud']},{row['Latitud']}" for _, row in nodos.iterrows()]
                     
-                    # OSRM gratuito solo permite 100 puntos. Si son menos, usamos calles reales.
                     if n <= 100:
                         coords_str = ";".join(coords)
                         url = f"http://router.project-osrm.org/table/v1/driving/{coords_str}?annotations=distance"
@@ -48,9 +47,8 @@ if archivo_subido is not None:
                             if res.get('code') == 'Ok':
                                 return [[int(d) for d in fila] for fila in res['distances']]
                         except:
-                            pass # Si falla el internet, pasa al plan B automático
+                            pass 
                             
-                    # Plan B: Si son más de 100 puntos o falla OSRM, usa "Factor Urbano" (Línea Recta x 1.4)
                     matriz = []
                     for i in range(n):
                         fila = []
@@ -88,7 +86,7 @@ if archivo_subido is not None:
                 search_parameters = pywrapcp.DefaultRoutingSearchParameters()
                 search_parameters.first_solution_strategy = (routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
                 search_parameters.local_search_metaheuristic = (routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH)
-                search_parameters.time_limit.FromSeconds(15) # Le dimos 15 segundos para pensar mejor
+                search_parameters.time_limit.FromSeconds(15) 
 
                 solucion = routing.SolveWithParameters(search_parameters)
 
@@ -134,7 +132,6 @@ if archivo_subido is not None:
                         
                         distancia_total += route_dist
                         if len(coords) > 2: 
-                            # Guardamos el color aquí para usarlo en la leyenda después
                             rutas_para_mapa.append({'vehiculo': id_vehiculo, 'coordenadas': coords, 'nodos': nodos, 'color': color_asignado})
 
                     df_final = pd.DataFrame(datos_tabla)
@@ -154,6 +151,18 @@ if archivo_subido is not None:
 
         # --- MOSTRAR LOS RESULTADOS GUARDADOS EN MEMORIA ---
         if st.session_state.rutas_calculadas:
+            
+            # 1. LA NUEVA VENTANA DE EXPLICACIÓN PARA EL DESPACHADOR Y CONDUCTORES
+            with st.expander("🧠 ¿Cómo calculó la inteligencia artificial esta ruta? (Guía de apoyo para conductores)"):
+                st.markdown("""
+                **Usa esta información para argumentarle a los conductores por qué se programó de esta manera:**
+                
+                * **🎯 Visión Global, no Local:** El conductor suele pensar *"¿Por qué no pasé por ese cliente si me quedaba a 3 cuadras?"*. La respuesta es: el algoritmo no busca que *un* solo camión haga la ruta más bonita, sino que **toda la flota en conjunto** gaste la menor cantidad de kilómetros y gasolina posible. Enviarlo a él a esas 3 cuadras extras podría significar desviar a otro camión 10 kilómetros después.
+                * **⚖️ Límite de Capacidad Estricto:** Si un camión pasó por el lado de un cliente y no lo recogió, es porque el sistema calculó matemáticamente que recoger a ese cliente haría que el camión excediera su límite de carga (kg) más adelante antes de volver al acopio.
+                * **🗺️ Calles Reales, no Helicópteros:** Esta herramienta se conecta a satélites (API de OSRM) para leer el sentido de las calles. A veces un cliente se ve "cerca" en el mapa, pero debido al trazado de las calles, avenidas de un solo sentido o retornos lejanos, es más barato enviárselo a otro compañero que viene en el sentido correcto de la vía.
+                * **💰 Ahorro de Flota:** Si ves que un camión se quedó parqueado en el acopio y no se le asignó ruta, ¡es una victoria! El algoritmo (OR-Tools de Google) detectó que la carga del día cabía en menos vehículos y decidió ahorrar ese costo operativo.
+                """)
+
             st.subheader("📋 Resultados de la Optimización")
             st.dataframe(st.session_state.df_activas, use_container_width=True)
             st.info(f"🌎 Distancia total operativa de la flota: {round(st.session_state.distancia_total / 1000, 2)} km")
@@ -174,7 +183,6 @@ if archivo_subido is not None:
             st.subheader("🗺️ Mapa Visual de Rutas")
             mapa = folium.Map(location=[st.session_state.todos_los_nodos['Latitud'].mean(), st.session_state.todos_los_nodos['Longitud'].mean()], zoom_start=13)
             
-            # --- 1. AÑADIR LEYENDA (CONVENCIONES DE COLORES) ---
             legend_html = '''
                 <div style="position: fixed; bottom: 50px; left: 50px; width: auto; min-width: 150px; height: auto; 
                             border:2px solid grey; z-index:9999; font-size:14px;
@@ -187,15 +195,15 @@ if archivo_subido is not None:
             mapa.get_root().html.add_child(folium.Element(legend_html))
 
             for _, row in st.session_state.df_acopios.iterrows():
-                folium.Marker([row['Latitud'], row['Longitud']], popup=f"Acopio: {row['ID_Acopio']}", icon=folium.Icon(color='black', icon='home')).add_to(mapa)
+                # NUEVO POPUP PARA ACOPIOS AL HACER CLIC
+                popup_acopio = folium.Popup(f"<b>🏠 Acopio:</b> {row['ID_Acopio']}", max_width=200)
+                folium.Marker([row['Latitud'], row['Longitud']], popup=popup_acopio, tooltip="Clic para ver Acopio", icon=folium.Icon(color='black', icon='home')).add_to(mapa)
 
-            # --- 2. DIBUJAR RUTAS Y ETIQUETAS EXPLÍCITAS ---
             for ruta in st.session_state.rutas_para_mapa:
                 color = ruta['color']
                 folium.PolyLine(ruta['coordenadas'], weight=4, color=color, opacity=0.8).add_to(mapa)
                 
                 for nodo in ruta['nodos'][1:]:
-                    # Etiqueta HTML con el número arriba y el ID del cliente abajo
                     html = f'''
                         <div style="display: flex; flex-direction: column; align-items: center; margin-top: -10px;">
                             <div style="color: white; background-color: {color}; border-radius: 50%; width: 24px; height: 24px; display: flex; justify-content: center; align-items: center; border: 2px solid white; font-weight: bold; font-size: 13px; box-shadow: 1px 1px 3px rgba(0,0,0,0.5);">
@@ -206,9 +214,21 @@ if archivo_subido is not None:
                             </div>
                         </div>
                     '''
+                    
+                    # NUEVO POPUP MEJORADO AL HACER CLIC EN EL CLIENTE
+                    html_popup = f"""
+                    <div style="font-family: sans-serif; min-width: 150px;">
+                        <h4 style="margin-top: 0; color: {color};">Cliente: {nodo['id']}</h4>
+                        <b>📍 Parada número:</b> {nodo['paso']}<br>
+                        <b>🚛 Vehículo asignado:</b> {ruta['vehiculo']}<br>
+                    </div>
+                    """
+                    popup_interactivo = folium.Popup(html_popup, max_width=300)
+
                     folium.Marker(
                         [nodo['lat'], nodo['lon']], 
-                        tooltip=f"Parada #{nodo['paso']} | Cliente: {nodo['id']} | Vehículo: {ruta['vehiculo']}", 
+                        tooltip=f"Clic para ver info de {nodo['id']}", 
+                        popup=popup_interactivo,  # <--- ESTO ACTIVA LA TARJETA AL HACER CLIC
                         icon=folium.DivIcon(html=html)
                     ).add_to(mapa)
 
